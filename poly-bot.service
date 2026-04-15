@@ -1,0 +1,31 @@
+[Unit]
+Description=Polymarket Late Entry Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_USERNAME
+Group=YOUR_USERNAME
+WorkingDirectory=/home/YOUR_USERNAME/poly-bot
+
+# Activate virtual environment and run bot
+Environment=PATH=/home/YOUR_USERNAME/poly-bot/venv/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/YOUR_USERNAME/poly-bot/venv/bin/python bot_late.py
+
+# Auto-restart configuration
+Restart=always
+RestartSec=10
+StartLimitInterval=60
+StartLimitBurst=3
+
+# Logging
+StandardOutput=append:/home/YOUR_USERNAME/poly-bot/logs/service.log
+StandardError=append:/home/YOUR_USERNAME/poly-bot/logs/service_error.log
+
+# Security
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
