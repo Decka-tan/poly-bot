@@ -1003,7 +1003,9 @@ class PolymarketExecutor:
 
         # ── Step 1b: Cek likuiditas market ──
         # Market dengan volume terlalu rendah sering kena FOK killed (order book tipis)
-        if not self.dry_run and market.volume < MIN_MARKET_VOLUME:
+        # SKIP volume check untuk BTC 5-min scraped markets (volume=0 tapi likuiditas tinggi)
+        is_btc_5min = market.question.startswith("Bitcoin Up or Down -")
+        if not self.dry_run and not is_btc_5min and market.volume < MIN_MARKET_VOLUME:
             logger.warning(
                 f"[EXEC] Market volume terlalu rendah: "
                 f"${market.volume:,.0f} < ${MIN_MARKET_VOLUME:,.0f} — skip bet "
