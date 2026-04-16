@@ -283,154 +283,126 @@ class MarketFinder:
 
     def find_active_btc_5min(self) -> MarketInfo | None:
         """
-        Cari market Bitcoin Up or Down 5-MENIT yang aktif paling awal berakhirnya.
-        Filter ketat:
-          - Hanya 5-menit window (bukan 15-menit, dsb)
-          - Window harus sedang berlangsung atau paling lama 7 menit lagi
-          - Tidak boleh window yang masih berjam-jam ke depan
+        Cari market Bitcoin Up or Down 5-MENIT yang aktif.
+
+        POLYMETER UPDATE 2026-04: BTC 5-min markets TIDAK ADA di Gamma API.
+        Must SCRAPE website Polymarket untuk dapat data.
+
+        Market slug pattern: btc-updown-5m-{unix_timestamp}
         """
         MAX_END_AHEAD = 7 * 60   # 7 menit dalam detik
 
         try:
             from datetime import datetime as _dt2, timezone as _tz2, timedelta as _td2
+            import time as _time
 
-            now_utc    = _dt2.now(_tz2.utc)
-            # Window: cari market yang berakhir antara sekarang s/d 8 menit ke depan
-            end_min    = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
-            end_max    = (now_utc + _td2(minutes=8)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            now_utc = _dt2.now(_tz2.utc)
+            now_ts = int(now_utc.timestamp())
 
-            markets = []
+            # BTC 5-min markets dibuat tiap 5 menit
+            # Cari 3 window terakhir (current, next, prev)
+            candidates_ts = []
+            for i in range(-2, 3):  # -2, -1, 0, 1, 2
+                # Round ke 5-menit block terdekat
+                ts = ((now_ts // 300) + i) * 300
+                candidates_ts.append(ts)
 
-            # ── Strategi 1: filter berdasarkan endDate (paling akurat) ──
-            # Langsung dapat market yang akan berakhir dalam 8 menit
-            try:
-                resp1 = requests.get(
-                    f"{GAMMA_HOST}/markets",
-                    params={
-                        "closed"       : "false",
-                        "limit"        : 50,
-                        "end_date_min" : end_min,
-                        "end_date_max" : end_max,
-                    },
-                    timeout=10,
-                )
-                if resp1.status_code == 200:
-                    raw1 = resp1.json()
-                    markets = raw1 if isinstance(raw1, list) else raw1.get("markets", raw1.get("data", []))
-                    logger.debug(f"[EXEC] Strategi 1 (endDate filter): {len(markets)} markets")
-            except Exception as e1:
-                logger.debug(f"[EXEC] Strategi 1 gagal: {e1}")
+            # Cek setiap candidate market
+            for ts in candidates_ts:
+                slug = f"btc-updown-5m-{ts}"
+                url = f"https://polymarket.com/event/{slug}"
 
-            # ── Strategi 2: fallback — keyword search by volume ──
-            # Dipakai kalau strategi 1 tidak dapat BTC market
-            has_btc = any(
-                any(k in m.get("question", "").lower() for k in self.BTC_KEYWORDS)
-                and self.UPDOWN_MARKER in m.get("question", "").lower()
-                for m in markets
-            )
-            if not has_btc:
-                for search_kw in ["Bitcoin Up or Down", "Bitcoin Up or Down - 5 Minutes", None]:
-                    p2 = {"closed": "false", "limit": 100, "order": "volume", "ascending": "false"}
-                    if search_kw:
-                        p2["search"] = search_kw
-                    try:
-                        resp2 = requests.get(f"{GAMMA_HOST}/markets", params=p2, timeout=10)
-                        resp2.raise_for_status()
-                        raw2    = resp2.json()
-                        mkts2   = raw2 if isinstance(raw2, list) else raw2.get("markets", raw2.get("data", []))
-                        has_b2  = any(
-                            any(k in m.get("question","").lower() for k in self.BTC_KEYWORDS)
-                            and self.UPDOWN_MARKER in m.get("question","").lower()
-                            for m in mkts2
-                        )
-                        if has_b2:
-                            markets = mkts2
-                            logger.debug(f"[EXEC] Strategi 2 (keyword='{search_kw}'): {len(markets)} markets")
-                            break
-                    except Exception:
-                        pass
+                try:
+                    # Scrape website
+                    resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
+                    if resp.status_code != 200:
+                        continue
 
-            # Log semua market BTC Up/Down yang ditemukan (sebelum time filter)
-            btc_all = [
-                m for m in markets
-                if any(k in m.get("question","").lower() for k in self.BTC_KEYWORDS)
-                and self.UPDOWN_MARKER in m.get("question","").lower()
-            ]
-            logger.info(
-                f"[EXEC] Gamma API: {len(markets)} total markets, "
-                f"{len(btc_all)} BTC Up/Down markets ditemukan"
-            )
-            for m in btc_all[:8]:   # log max 8 pertama
-                q5 = m.get('question','')
-                ed = m.get("endDate") or m.get("end_date") or m.get("end_date_iso") or "—"
-                logger.info(
-                    f"[EXEC]   - active={m.get('active')} closed={m.get('closed')} "
-                    f"5min={self._is_5min_window(q5)} "
-                    f"endDate={ed} "
-                    f"| {q5[-55:]}"
-                )
+                    # Extract data from __NEXT_DATA__
+                    match = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', resp.text, re.DOTALL)
+                    if not match:
+                        continue
 
-            candidates = []
-            for m in markets:
-                question = m.get("question", "")
-                q_lower  = question.lower()
+                    data = json.loads(match.group(1))
+                    dehydrated = data.get('props', {}).get('pageProps', {}).get('dehydratedState', {})
+                    queries = dehydrated.get('queries', [])
 
-                is_btc    = any(k in q_lower for k in self.BTC_KEYWORDS)
-                is_updown = self.UPDOWN_MARKER in q_lower
-                is_5min   = self._is_5min_window(question)
+                    # Cari market data di queries
+                    for query in queries:
+                        state = query.get('state', {})
+                        if not isinstance(state, dict):
+                            continue
 
-                # is_active: gunakan active=True ATAU closed=False (lebih toleran)
-                # Polymarket kadang set active=False saat window sudah dimulai/close
-                is_active = m.get("active", False) or not m.get("closed", True)
+                        markets = state.get('data')
+                        if not isinstance(markets, list):
+                            # Coba path state.data.markets
+                            markets = state.get('data', {}).get('markets', [])
 
-                if not (is_btc and is_updown and is_5min):
-                    continue
-                if not is_active:
-                    logger.info(f"[EXEC] Skip (inactive+closed): active={m.get('active')} closed={m.get('closed')} | {question[-50:]}")
-                    continue
+                        if not isinstance(markets, list) or len(markets) == 0:
+                            continue
 
-                # ── Filter waktu: window harus sedang berlangsung atau maks 7 menit lagi ──
-                # Pass endDate sebagai fallback untuk market format baru (tanpa waktu di judul)
-                end_date = m.get("endDate") or m.get("end_date_iso") or ""
-                if not self._is_current_window(
-                    question,
-                    max_ahead_sec=MAX_END_AHEAD,
-                    end_date_str=end_date,
-                ):
+                        for mkt in markets:
+                            if not isinstance(mkt, dict):
+                                continue
+
+                            # Get condition ID and token IDs
+                            condition_id = mkt.get('conditionId') or mkt.get('condition_id')
+                            token_ids = mkt.get('clobTokenIds') or mkt.get('tokens')
+
+                            if not condition_id or not token_ids:
+                                continue
+
+                            # Parse prices
+                            yes_price = 0.5
+                            no_price = 0.5
+                            outcome_prices = mkt.get('outcomePrices')
+                            if outcome_prices and isinstance(outcome_prices, list) and len(outcome_prices) >= 2:
+                                try:
+                                    yes_price = float(outcome_prices[0])
+                                    no_price = float(outcome_prices[1])
+                                except:
+                                    pass
+
+                            # Check if market is still active (not closed)
+                            # BTC 5-min markets close exactly at window end
+                            window_end = _dt2.fromtimestamp(ts, _tz2.utc)
+                            remaining = (window_end - now_utc).total_seconds()
+
+                            # Skip kalau sudah lewat > 2 menit
+                            if remaining < -120:
+                                logger.debug(f"[EXEC] Skip expired window: {slug} (remaining={remaining:.0f}s)")
+                                continue
+
+                            # Skip kalau terlalu jauh ke depan (> 7 menit)
+                            if remaining > MAX_END_AHEAD:
+                                logger.debug(f"[EXEC] Skip future window: {slug} (remaining={remaining:.0f}s)")
+                                continue
+
+                            # Build MarketInfo
+                            question = f"Bitcoin Up or Down - {_dt2.fromtimestamp(ts, _tz2.utc).strftime('%b %d, %I:%M%p')} ET"
+                            logger.info(f"[EXEC] Found active market: {question} (remaining={remaining:.0f}s)")
+
+                            return MarketInfo(
+                                condition_id=condition_id,
+                                question=question,
+                                yes_token_id=token_ids[0],
+                                no_token_id=token_ids[1] if len(token_ids) > 1 else token_ids[0],
+                                yes_price=yes_price,
+                                no_price=no_price,
+                                end_date_iso=window_end.isoformat(),
+                                active=True,
+                                volume=0.0,  # Not available in scraped data
+                            )
+
+                except Exception as e:
+                    logger.debug(f"[EXEC] Failed to fetch {slug}: {e}")
                     continue
 
-                candidates.append(m)
+            logger.info("[EXEC] Tidak ada market BTC 5-min aktif dalam 7 menit ke depan")
+            return None
 
-            if not candidates:
-                logger.info("[EXEC] Tidak ada market BTC 5-min aktif dalam 7 menit ke depan")
-                return None
-
-            # Pilih yang end_date paling awal (window yang paling dekat berakhir)
-            # Sorting berdasarkan waktu end dari judul market (lebih reliable dari endDate field)
-            def _sort_key(m):
-                q = m.get("question", "")
-                match = re.search(
-                    r'(\d{1,2}):(\d{2})(AM|PM)-(\d{1,2}):(\d{2})(AM|PM)',
-                    q, re.IGNORECASE
-                )
-                if not match:
-                    return 9999
-                _, _, _, h2, m2, p2 = match.groups()
-                h2, m2 = int(h2), int(m2)
-                if p2.upper() == "PM" and h2 != 12: h2 += 12
-                if p2.upper() == "AM" and h2 == 12: h2 = 0
-                return h2 * 60 + m2
-            try:
-                candidates.sort(key=_sort_key)
-            except Exception:
-                pass
-
-            best = candidates[0]
-            logger.info(f"[EXEC] Market found: {best.get('question','')}")
-            return self._parse_market(best)
-
-        except requests.RequestException as e:
-            logger.error(f"[EXEC] Gamma API error: {e}")
+        except Exception as e:
+            logger.error(f"[EXEC] find_active_btc_5min error: {e}")
             return None
 
     def find_next_btc_5min(self) -> tuple[MarketInfo | None, float]:
