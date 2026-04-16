@@ -803,71 +803,31 @@ class PolymarketExecutor:
 
     def get_balance(self) -> float:
         """
-        Ambil saldo USDC (collateral) dari Polymarket.
-
-        Prioritas:
-          1. Polymarket Data API (paling akurat, termasuk funder address)
-          2. Fallback ke CLOB SDK get_balance_allowance
+        Ambil saldo USDC (collateral) dari Polymarket CLOB SDK.
+        Balance dalam micro-USDC (6 desimal) — convert ke USDC.
         """
         if self.dry_run:
             return 1000.0  # Saldo simulasi
 
-        # ── Method 1: Polymarket Data API (paling reliable) ──
-        try:
-            address = self._get_wallet_address()
-            if address:
-                # Data API: balance by address
-                resp = requests.get(
-                    f"https://data-api.polymarket.com/wallet",
-                    params={"address": address, "testnet": "false"},
-                    timeout=5,
-                )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    # Response: {"balanceUsd": "5.75", ...}
-                    balance_usd = data.get("balanceUsd") or data.get("balance_usd") or data.get("balance")
-                    if balance_usd:
-                        bal = float(str(balance_usd).strip())
-                        logger.info(f"[EXEC] Balance via Data API: ${bal:.2f}")
-                        return round(bal, 4)
-        except Exception as e:
-            logger.debug(f"[EXEC] Data API balance fetch failed: {e}")
-
-        # ── Method 2: Fallback CLOB SDK ──
         try:
             from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
             params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
-            resp   = self._client.get_balance_allowance(params)
+            resp = self._client.get_balance_allowance(params)
 
-            # Normalisasi response ke dict
+            # SDK returns dict: {"balance": "5745972", "allowances": {...}}
             if isinstance(resp, dict):
-                data = resp
-            elif hasattr(resp, "json") and callable(resp.json):
-                try:
-                    data = resp.json()
-                except Exception:
-                    data = {}
-            elif hasattr(resp, "__dict__"):
-                data = vars(resp)
+                balance_str = resp.get("balance", "0")
+            elif hasattr(resp, "balance"):
+                balance_str = str(resp.balance)
             else:
-                try:
-                    import json as _json
-                    data = _json.loads(str(resp))
-                except Exception:
-                    data = {}
+                balance_str = str(resp)
 
-            logger.info(f"[EXEC] balance_allowance raw: {data}")
+            # Balance dalam micro-USDC (6 desimal)
+            raw = float(balance_str.strip('"'))
+            usdc = raw / 1_000_000 if raw > 1000 else raw
 
-            for key in ("balance", "Balance", "USDC", "usdc", "amount", "BALANCE"):
-                val = data.get(key) if isinstance(data, dict) else getattr(data, key, None)
-                if val is not None and str(val).strip() not in ("", "None"):
-                    raw = float(str(val).strip())
-                    if raw > 1000:
-                        return round(raw / 1_000_000, 4)
-                    return round(raw, 4)
-
-            logger.warning(f"[EXEC] Field balance tidak ditemukan dalam response: {data}")
-            return 0.0
+            logger.info(f"[EXEC] Balance: ${usdc:.2f} (raw: {raw})")
+            return round(usdc, 4)
 
         except Exception as e:
             logger.error(f"[EXEC] get_balance error: {e}")
