@@ -42,6 +42,33 @@ API_KEY      = os.getenv("POLYMARKET_API_KEY", "")
 API_SECRET   = os.getenv("POLYMARKET_API_SECRET", "")
 API_PASS     = os.getenv("POLYMARKET_API_PASSPHRASE", "")
 
+# Proxy config (untuk bypass geoblock)
+HTTP_PROXY   = os.getenv("HTTP_PROXY", "")
+HTTPS_PROXY  = os.getenv("HTTPS_PROXY", "")
+PROXIES = {}
+if HTTP_PROXY or HTTPS_PROXY:
+    PROXIES = {
+        "http":  HTTP_PROXY,
+        "https": HTTPS_PROXY or HTTP_PROXY,
+    }
+    logger.info(f"[EXEC] Using proxy: {PROXIES}")
+
+# Global session dengan proxy
+_session = requests.Session()
+if PROXIES:
+    _session.proxies.update(PROXIES)
+    _session.trust_env = False  # jangan pakai system proxy
+
+# ── Monkey-patch requests untuk auto-pakai proxy ──
+_original_request = requests.request
+def _request_with_proxy(method, url, *args, **kwargs):
+    if PROXIES and 'proxies' not in kwargs:
+        kwargs['proxies'] = PROXIES
+    return _original_request(method, url, *args, **kwargs)
+
+requests.request = _request_with_proxy
+requests.Session.request = _request_with_proxy
+
 # ─────────────────────────────────────────────
 # Retry config
 # ─────────────────────────────────────────────
